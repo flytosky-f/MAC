@@ -34,6 +34,17 @@ struct RIFF_CHUNK_HEADER
     uint32 nChunkBytes;       // the bytes of the chunk  
 };
 
+unsigned long UCHAR_TO_ULONG_LE(unsigned char* buf)
+    /* converts 4 bytes stored in little-endian format to an unsigned long */
+{
+    return (unsigned long)((buf[3] << 24) + (buf[2] << 16) + (buf[1] << 8) + buf[0]);
+}
+
+unsigned short UCHAR_TO_USHORT_LE(unsigned char* buf)
+    /* converts 2 bytes stored in little-endian format to an unsigned short */
+{
+    return (unsigned short)((buf[1] << 8) + buf[0]);
+}
 
 CInputSource * CreateInputSource(const wchar_t * pSourceName, WAVEFORMATEX * pwfeSource, int * pTotalBlocks, int64 * pHeaderBytes, int64 * pTerminatingBytes, int * pErrorCode)
 { 
@@ -44,22 +55,7 @@ CInputSource * CreateInputSource(const wchar_t * pSourceName, WAVEFORMATEX * pwf
         return NULL;
     }
 
-    // get the extension
-    const wchar_t * pExtension = &pSourceName[wcslen(pSourceName)];
-    while ((pExtension > pSourceName) && (*pExtension != '.'))
-        pExtension--;
-
-    // create the proper input source
-    if (StringIsEqual(pExtension, L".wav", false))
-    {
-        if (pErrorCode) *pErrorCode = ERROR_SUCCESS;
-        return new CWAVInputSource(pSourceName, pwfeSource, pTotalBlocks, pHeaderBytes, pTerminatingBytes, pErrorCode);
-    }
-    else
-    {
-        if (pErrorCode) *pErrorCode = ERROR_INVALID_INPUT_FILE;
-        return NULL;
-    }
+    return new CWAVInputSource(pSourceName, pwfeSource, pTotalBlocks, pHeaderBytes, pTerminatingBytes, pErrorCode);
 }
 
 CWAVInputSource::CWAVInputSource(CIO * pIO, WAVEFORMATEX * pwfeSource, int * pTotalBlocks, int64 * pHeaderBytes, int64 * pTerminatingBytes, int * pErrorCode)
@@ -130,84 +126,96 @@ CWAVInputSource::~CWAVInputSource()
 
 int CWAVInputSource::AnalyzeSource()
 {
+    unsigned char* p = m_sFullHeader;
+
     // seek to the beginning (just in case)
     m_spIO->SetSeekMethod(APE_FILE_BEGIN);
     m_spIO->SetSeekPosition(0);
     m_spIO->PerformSeek();
-    
+
     // get the file size
-    m_nFileBytes = m_spIO->GetSize();
+    int64 nRealFileBytes = m_spIO->GetSize();
 
     // get the RIFF header
-    RIFF_HEADER RIFFHeader;
-    RETURN_ON_ERROR(ReadSafe(m_spIO, &RIFFHeader, sizeof(RIFFHeader))) 
+    RETURN_ON_ERROR(ReadSafe(m_spIO, p, sizeof(RIFF_HEADER)))
 
     // make sure the RIFF header is valid
-    if (!(RIFFHeader.cRIFF[0] == 'R' && RIFFHeader.cRIFF[1] == 'I' && RIFFHeader.cRIFF[2] == 'F' && RIFFHeader.cRIFF[3] == 'F')) 
+    if (!(p[0] == 'R' && p[1] == 'I' && p[2] == 'F' && p[3] == 'F'))
         return ERROR_INVALID_INPUT_FILE;
+
+    // get the file size from RIFF header
+    int64 nFileBytes = UCHAR_TO_ULONG_LE(p + 4) + sizeof(RIFF_HEADER);
+    p += sizeof(RIFF_HEADER);
+
+    m_nFileBytes = ape_max(nFileBytes, nRealFileBytes);
 
     // read the data type header
-    DATA_TYPE_ID_HEADER DataTypeIDHeader;
-    RETURN_ON_ERROR(ReadSafe(m_spIO, &DataTypeIDHeader, sizeof(DataTypeIDHeader))) 
-    
+    RETURN_ON_ERROR(ReadSafe(m_spIO, p, sizeof(DATA_TYPE_ID_HEADER)))
+
     // make sure it's the right data type
-    if (!(DataTypeIDHeader.cDataTypeID[0] == 'W' && DataTypeIDHeader.cDataTypeID[1] == 'A' && DataTypeIDHeader.cDataTypeID[2] == 'V' && DataTypeIDHeader.cDataTypeID[3] == 'E')) 
+    if (!(p[0] == 'W' && p[1] == 'A' && p[2] == 'V' && p[3] == 'E'))
         return ERROR_INVALID_INPUT_FILE;
+    p += sizeof(DATA_TYPE_ID_HEADER);
 
     // find the 'fmt ' chunk
-    RIFF_CHUNK_HEADER RIFFChunkHeader;
-    RETURN_ON_ERROR(ReadSafe(m_spIO, &RIFFChunkHeader, sizeof(RIFFChunkHeader))) 
-    
-    while (!(RIFFChunkHeader.cChunkLabel[0] == 'f' && RIFFChunkHeader.cChunkLabel[1] == 'm' && RIFFChunkHeader.cChunkLabel[2] == 't' && RIFFChunkHeader.cChunkLabel[3] == ' ')) 
+    RETURN_ON_ERROR(ReadSafe(m_spIO, p, sizeof(RIFF_CHUNK_HEADER)))
+
+    while (!(p[0] == 'f' && p[1] == 'm' && p[2] == 't' && p[3] == ' '))
     {
         // move the file pointer to the end of this chunk
-        m_spIO->SetSeekMethod(APE_FILE_CURRENT);
-        m_spIO->SetSeekPosition(RIFFChunkHeader.nChunkBytes);
-        m_spIO->PerformSeek();
+        uint32 nChunkBytes = UCHAR_TO_ULONG_LE(p + 4);
+        p += sizeof(RIFF_CHUNK_HEADER);
+        RETURN_ON_ERROR(ReadSafe(m_spIO, p, nChunkBytes))
+        p += nChunkBytes;
 
         // check again for the data chunk
-        RETURN_ON_ERROR(ReadSafe(m_spIO, &RIFFChunkHeader, sizeof(RIFFChunkHeader))) 
+        RETURN_ON_ERROR(ReadSafe(m_spIO, p, sizeof(RIFF_CHUNK_HEADER)))
     }
-    
+
+    uint32 nFmtChunkBytes = UCHAR_TO_ULONG_LE(p + 4);
+    p += sizeof(RIFF_CHUNK_HEADER);
+
     // read the format info
-    WAV_FORMAT_HEADER WAVFormatHeader;
-    RETURN_ON_ERROR(ReadSafe(m_spIO, &WAVFormatHeader, sizeof(WAVFormatHeader))) 
+    RETURN_ON_ERROR(ReadSafe(m_spIO, p, sizeof(WAV_FORMAT_HEADER)))
 
     // error check the header to see if we support it
-    if ((WAVFormatHeader.nFormatTag != 1) && (WAVFormatHeader.nFormatTag != 65534))
+    uint16 nFormatTag = UCHAR_TO_USHORT_LE(p);
+    if (nFormatTag != 1 && nFormatTag != 65534)
         return ERROR_INVALID_INPUT_FILE;
 
     // copy the format information to the WAVEFORMATEX passed in
-    FillWaveFormatEx(&m_wfeSource, WAVFormatHeader.nSamplesPerSecond, WAVFormatHeader.nBitsPerSample, WAVFormatHeader.nChannels);
+    FillWaveFormatEx(&m_wfeSource, UCHAR_TO_ULONG_LE(p + 4), UCHAR_TO_USHORT_LE(p + 14), UCHAR_TO_USHORT_LE(p + 2));
+
+    p += sizeof(WAV_FORMAT_HEADER);
 
     // skip over any extra data in the header
-    int nWAVFormatHeaderExtra = RIFFChunkHeader.nChunkBytes - sizeof(WAVFormatHeader);
+    int nWAVFormatHeaderExtra = nFmtChunkBytes - sizeof(WAV_FORMAT_HEADER);
     if (nWAVFormatHeaderExtra < 0)
         return ERROR_INVALID_INPUT_FILE;
-    else
-    {
-        m_spIO->SetSeekMethod(APE_FILE_CURRENT);
-        m_spIO->SetSeekPosition(nWAVFormatHeaderExtra);
-        m_spIO->PerformSeek();
+    else {
+        RETURN_ON_ERROR(ReadSafe(m_spIO, p, nWAVFormatHeaderExtra))
+        p += nWAVFormatHeaderExtra;
     }
     
     // find the data chunk
-    RETURN_ON_ERROR(ReadSafe(m_spIO, &RIFFChunkHeader, sizeof(RIFFChunkHeader))) 
+    RETURN_ON_ERROR(ReadSafe(m_spIO, p, sizeof(RIFF_CHUNK_HEADER)))
 
-    while (!(RIFFChunkHeader.cChunkLabel[0] == 'd' && RIFFChunkHeader.cChunkLabel[1] == 'a' && RIFFChunkHeader.cChunkLabel[2] == 't' && RIFFChunkHeader.cChunkLabel[3] == 'a')) 
+    while (!(p[0] == 'd' && p[1] == 'a' && p[2] == 't' && p[3] == 'a'))
     {
         // move the file pointer to the end of this chunk
-        m_spIO->SetSeekMethod(APE_FILE_CURRENT);
-        m_spIO->SetSeekPosition(RIFFChunkHeader.nChunkBytes);
-        m_spIO->PerformSeek();
+        uint32 nChunkBytes = UCHAR_TO_ULONG_LE(p + 4);
+        p += sizeof(RIFF_CHUNK_HEADER);
+        RETURN_ON_ERROR(ReadSafe(m_spIO, p, nChunkBytes))
+        p += nChunkBytes;
 
         // check again for the data chunk
-        RETURN_ON_ERROR(ReadSafe(m_spIO, &RIFFChunkHeader, sizeof(RIFFChunkHeader))) 
+        RETURN_ON_ERROR(ReadSafe(m_spIO, p, sizeof(RIFF_CHUNK_HEADER)))
     }
 
     // we're at the data block
-    m_nHeaderBytes = m_spIO->GetPosition();
-    m_nDataBytes = RIFFChunkHeader.nChunkBytes;
+    m_nDataBytes = UCHAR_TO_ULONG_LE(p + 4);
+    p += sizeof(RIFF_CHUNK_HEADER);
+    m_nHeaderBytes = p - m_sFullHeader;
     if (m_nDataBytes > (m_nFileBytes - m_nHeaderBytes))
         m_nDataBytes = m_nFileBytes - m_nHeaderBytes;
 
@@ -241,30 +249,9 @@ int CWAVInputSource::GetHeaderData(unsigned char * pBuffer)
 {
     if (!m_bIsValid) return ERROR_UNDEFINED;
 
-    int nResult = ERROR_SUCCESS;
+    memcpy(pBuffer, m_sFullHeader, m_nHeaderBytes);
 
-    if (m_nHeaderBytes > 0)
-    {
-        int64 nOriginalFileLocation = m_spIO->GetPosition();
-
-        m_spIO->SetSeekMethod(APE_FILE_BEGIN);
-        m_spIO->SetSeekPosition(0);
-        m_spIO->PerformSeek();
-        
-        unsigned int nBytesRead = 0;
-        int nReadRetVal = m_spIO->Read(pBuffer, uint32(m_nHeaderBytes), &nBytesRead);
-
-        if ((nReadRetVal != ERROR_SUCCESS) || (m_nHeaderBytes != int(nBytesRead)))
-        {
-            nResult = ERROR_UNDEFINED;
-        }
-
-        m_spIO->SetSeekMethod(APE_FILE_BEGIN);
-        m_spIO->SetSeekPosition(nOriginalFileLocation);
-        m_spIO->PerformSeek();
-    }
-
-    return nResult;
+    return ERROR_SUCCESS;
 }
 
 int CWAVInputSource::GetTerminatingData(unsigned char * pBuffer)

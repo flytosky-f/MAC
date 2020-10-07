@@ -34,25 +34,38 @@ int CWinFileIO::Open(const wchar_t * pName, bool bOpenReadOnly)
         CSmartPtr<char> spName(GetANSIFromUTF16(pName), true);
     #endif
 
-    // open (read / write)
-    if (!bOpenReadOnly)
-        m_hFile = ::CreateFile(spName, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (m_hFile == INVALID_HANDLE_VALUE) 
+    if (0 == wcscmp(pName, _T("-")))
     {
-        // open (read-only)
-        m_hFile = ::CreateFile(spName, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (m_hFile == INVALID_HANDLE_VALUE) 
+        // ReadOnly
+        m_hFile = GetStdHandle(STD_INPUT_HANDLE);
+        if (m_hFile == INVALID_HANDLE_VALUE)
         {
             return -1;
         }
-        else 
-        {
-            m_bReadOnly = true;
-        }
+        m_bReadOnly = true;
     }
     else
     {
-        m_bReadOnly = false;
+         // open (read / write)
+        if (!bOpenReadOnly)
+            m_hFile = ::CreateFile(spName, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (m_hFile == INVALID_HANDLE_VALUE) 
+        {
+            // open (read-only)
+            m_hFile = ::CreateFile(spName, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (m_hFile == INVALID_HANDLE_VALUE) 
+            {
+                return -1;
+            }
+            else 
+            {
+                m_bReadOnly = true;
+            }
+        }
+        else
+        {
+            m_bReadOnly = false;
+        }
     }
     
     wcscpy_s(m_cFileName, MAX_PATH, pName);
@@ -158,12 +171,22 @@ int CWinFileIO::Create(const wchar_t * pName)
         CSmartPtr<char> spName(GetANSIFromUTF16(pName), true);
     #endif
 
-    m_hFile = CreateFile(spName, GENERIC_WRITE | GENERIC_READ, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (m_hFile == INVALID_HANDLE_VALUE) 
-        return ERROR_IO_WRITE;
+    if (0 == wcscmp(pName, _T("-")))
+    {
+        m_hFile = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (m_hFile == INVALID_HANDLE_VALUE)
+            return ERROR_IO_WRITE;
+        m_bReadOnly = false;
+    }
+    else
+    {
+        m_hFile = CreateFile(spName, GENERIC_WRITE | GENERIC_READ, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (m_hFile == INVALID_HANDLE_VALUE)
+            return ERROR_IO_WRITE;
 
-    m_bReadOnly = false;
-    
+        m_bReadOnly = false;
+    }
+
     wcscpy_s(m_cFileName, MAX_PATH, pName);
 
     return 0;

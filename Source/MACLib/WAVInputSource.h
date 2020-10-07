@@ -2,6 +2,8 @@
 
 #include "IO.h"
 
+#define FULL_HEADER_SIZE 32768
+
 namespace APE
 {
 
@@ -52,6 +54,7 @@ private:
     int64 m_nTerminatingBytes;
     int64 m_nFileBytes;
     bool m_bIsValid;
+    unsigned char m_sFullHeader[FULL_HEADER_SIZE];
 };
 
 /*************************************************************************************
